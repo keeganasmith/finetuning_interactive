@@ -7,11 +7,12 @@ from transformers import (
     DataCollatorForLanguageModeling,
     get_linear_schedule_with_warmup
 )
+from collections.abc import Mapping
 from datasets import load_dataset
 from torch.optim import Optimizer, AdamW
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
-from peft import get_peft_model
+from peft import get_peft_model, LoraConfig
 from tqdm.auto import tqdm
 import torch
 import math
@@ -24,12 +25,19 @@ class FinetuningStrategy(ABC):
 
 class LoraStrategy(FinetuningStrategy):
     def __init__(self, lora_config):
-        self.lora_config = lora_config
+        if isinstance(lora_config, Mapping):
+            self.lora_config = LoraConfig(**lora_config)
+        # otherwise assume it’s already a LoraConfig (or at least PeftConfig)
+        elif isinstance(lora_config, LoraConfig):
+            self.lora_config = lora_config
+        else:
+            raise ValueError(
+                f"Expected LoraConfig or dict, got {type(lora_config).__name__}"
+            )
 
     def apply(self, model):
-        # get_peft_model imported from peft
         return get_peft_model(model, self.lora_config)
-
+    
 # --- Abstract Base FineTuner ---
 class BaseFineTuner(ABC):
     def __init__(
