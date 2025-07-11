@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import Any, Tuple
+from typing import Any, Tuple, List
+
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -12,6 +13,7 @@ from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from peft import get_peft_model
 from tqdm.auto import tqdm
+import torch
 import math
 # --- Strategy Pattern for PEFT ---
 class FinetuningStrategy(ABC):
@@ -150,6 +152,47 @@ class BaseFineTuner(ABC):
         unwrapped = self.accelerator.unwrap_model(self.model)
         unwrapped.save_pretrained(self.output_dir, save_function=self.accelerator.save)
         self.tokenizer.save_pretrained(self.output_dir)
+
+    def infer(
+        self,
+        prompts: List[str],
+        max_new_tokens: int = 50,
+        **generation_kwargs
+    ) -> List[str]:
+        """
+        Generate continuations for a list of prompts using the fine-tuned model saved in output_dir.
+
+        Args:
+            prompts: List of input strings to generate from.
+            max_new_tokens: Number of tokens to generate per prompt.
+            generation_kwargs: Additional `model.generate` keyword args.
+
+        Returns:
+            List of generated strings (including the prompt).
+        """
+        # Load tokenizer and model from output_dir
+        
+        self.model.eval()
+
+        # Tokenize inputs
+        inputs = self.tokenizer(
+            prompts,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            max_length=self.max_length
+        )
+        inputs = {k: v.to(self.accelerator.device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            generated = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                **generation_kwargs
+            )
+
+        return self.tokenizer.batch_decode(generated, skip_special_tokens=True)
+
 
 class DefaultFineTuner(BaseFineTuner):
     def build_tokenizer(self) -> Any:
