@@ -27,7 +27,7 @@ def lora_inference_test():
     inference_result = tuner.infer(["What is the sqrt of pi?"])
     print("INFERENCE TEST RESULT")
     print("What is the sqrt of pi?", inference_result)
-    
+
 def lora_training_test():
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
@@ -68,7 +68,8 @@ def default_constructor_test():
 
 def main():
     #default_constructor_test()
-    lora_training_test()
+    #lora_training_test()
+    lora_inference_test()
 
 if __name__ == "__main__":
     main()
