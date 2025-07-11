@@ -13,7 +13,7 @@ curl -X POST http://localhost:5000/train \
     },
     "task_type": "CAUSAL_LM",
     "peft_type": "LORA",
-    "output_dir": "./example_finetuned_models/opt-lora",
+    "output_dir": "./example_finetuned_models/gpt2",
     "batch_size": 4,
     "max_length": 512,
     "lr": 5e-5,
