@@ -11,6 +11,8 @@ from torch.optim import Optimizer, AdamW
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from peft import get_peft_model
+from tqdm.auto import tqdm
+import math
 # --- Strategy Pattern for PEFT ---
 class FinetuningStrategy(ABC):
     @abstractmethod
@@ -39,6 +41,7 @@ class BaseFineTuner(ABC):
         lr: float = 5e-5,
         warmup_steps: int = 100,
         total_steps: int = 1000,
+        output_dir: str = ""
     ):
         self.accelerator    = Accelerator()
         self.model_path     = model_path
@@ -50,13 +53,14 @@ class BaseFineTuner(ABC):
         self.lr             = lr
         self.warmup_steps   = warmup_steps
         self.total_steps    = total_steps
+        self.output_dir     = output_dir
 
         self.tokenizer      = self.build_tokenizer()
         self.model          = self.build_model()
         self.dataset        = self.build_dataset()
         self.dataloader     = self.build_dataloader()
         self.optimizer, self.lr_scheduler = self.build_optim_and_scheduler()
-
+        
         # wrap with accelerator
         self.model, self.dataloader, self.optimizer, self.lr_scheduler = \
             self.accelerator.prepare(
@@ -84,7 +88,8 @@ class BaseFineTuner(ABC):
                 ex["text"], truncation=True,
                 padding="max_length", max_length=self.max_length
             )
-        tok = raw.map(tok_fn, batched=True)
+        tok = raw.map(tok_fn, batched=True, remove_columns=raw["train"].column_names)
+        tok.set_format(type="torch")
         return tok["train"]
 
     def build_dataloader(self) -> DataLoader:
@@ -109,6 +114,42 @@ class BaseFineTuner(ABC):
         )
         return opt, sched
 
+    def train(self):
+        """
+        Run the finetuning loop: forward, backward, and update.
+        """
+        self.model.train()
+        steps_per_epoch = len(self.dataloader)
+        epochs = math.ceil(self.total_steps / steps_per_epoch)
+        progress = tqdm(total=self.total_steps, desc="Training")
+        completed = 0
+
+        for epoch in range(1, epochs + 1):
+            for batch in self.dataloader:
+                outputs = self.model(**batch)
+                loss = outputs.loss
+                self.accelerator.backward(loss)
+                self.optimizer.step()
+                self.lr_scheduler.step()
+                self.optimizer.zero_grad()
+
+                progress.update(1)
+                progress.set_postfix({'loss': loss.item()})
+                completed += 1
+                if completed >= self.total_steps:
+                    break
+            if completed >= self.total_steps:
+                break
+
+        progress.close()
+        self.save_model()
+
+    def save_model(self):
+        """Save the fine-tuned model and tokenizer."""
+        self.accelerator.wait_for_everyone()
+        unwrapped = self.accelerator.unwrap_model(self.model)
+        unwrapped.save_pretrained(self.output_dir, save_function=self.accelerator.save)
+        self.tokenizer.save_pretrained(self.output_dir)
 
 class DefaultFineTuner(BaseFineTuner):
     def build_tokenizer(self) -> Any:
