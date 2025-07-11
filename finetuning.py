@@ -10,7 +10,7 @@ from datasets import load_dataset
 from torch.optim import Optimizer, AdamW
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
-
+from peft import get_peft_model
 # --- Strategy Pattern for PEFT ---
 class FinetuningStrategy(ABC):
     @abstractmethod
@@ -25,17 +25,6 @@ class LoraStrategy(FinetuningStrategy):
     def apply(self, model):
         # get_peft_model imported from peft
         return get_peft_model(model, self.lora_config)
-
-class QloraStrategy(FinetuningStrategy):
-    def __init__(self, qlora_config):
-        self.qlora_config = qlora_config
-
-    def apply(self, model):
-        # Example: import and apply QLoRA-specific wrapper
-        from peft import get_peft_model, QLoRAConfig
-        # assume qlora_config is a QLoRAConfig or dict
-        cfg = self.qlora_config if isinstance(self.qlora_config, QLoRAConfig) else QLoRAConfig(**self.qlora_config)
-        return get_peft_model(model, cfg)
 
 # --- Abstract Base FineTuner ---
 class BaseFineTuner(ABC):
@@ -120,13 +109,21 @@ class BaseFineTuner(ABC):
         )
         return opt, sched
 
-# --- Concrete Example Usage ---
-# from peft import LoraConfig, QLoRAConfig
-# lora_cfg  = LoraConfig(...)             # your LoRA settings
-# qlora_cfg = QLoRAConfig(...)            # your QLoRA settings
-# tuner = DefaultFineTuner(
-#     model_path="gpt2-medium",
-#     dataset_path="data/train.jsonl",
-#     dataset_type="json",
-#     strategy=QloraStrategy(qlora_cfg),
-# )
+
+class DefaultFineTuner(BaseFineTuner):
+    def build_tokenizer(self) -> Any:
+        # Load a pretrained tokenizer from model_path
+        result = AutoTokenizer.from_pretrained(self.model_path)
+        result.pad_token = result.eos_token
+        return result
+
+    # build_model is inherited — it loads the base LM and applies your strategy
+
+    # build_dataset is inherited — it loads & tokenizes via self.tokenizer
+
+    # build_dataloader is inherited — wraps the dataset in a DataLoader
+
+    def build_optim_and_scheduler(self) -> Tuple[Optimizer, Any]:
+        # If you want different defaults, override here; otherwise
+        # you can just call super():
+        return super().build_optim_and_scheduler()
