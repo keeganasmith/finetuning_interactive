@@ -1,66 +1,132 @@
-import os
-import torch
+from abc import ABC, abstractmethod
+from typing import Any, Tuple
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    DataCollatorForLanguageModeling,
+    get_linear_schedule_with_warmup
+)
 from datasets import load_dataset
-from huggingface_hub import list_datasets
-print(list_datasets())
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from accelerate import Accelerator
-from peft import LoraConfig, get_peft_model, TaskType
+from torch.optim import Optimizer, AdamW
 from torch.utils.data import DataLoader
-from transformers import DataCollatorForLanguageModeling
-from torch.optim import AdamW
-from transformers import get_linear_schedule_with_warmup
+from accelerate import Accelerator
 
+# --- Strategy Pattern for PEFT ---
+class FinetuningStrategy(ABC):
+    @abstractmethod
+    def apply(self, model: Any) -> Any:
+        """Apply the chosen PEFT method to the base model."""
+        ...
 
+class LoraStrategy(FinetuningStrategy):
+    def __init__(self, lora_config):
+        self.lora_config = lora_config
 
-class FineTune:
-    def __init__(self, model_path: str, dataset_path, dataset_type: str):
-        self.accelerator = Accelerator()
+    def apply(self, model):
+        # get_peft_model imported from peft
+        return get_peft_model(model, self.lora_config)
 
-        # Load tokenizer and model
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-        self.model = AutoModelForCausalLM.from_pretrained(model_path)
+class QloraStrategy(FinetuningStrategy):
+    def __init__(self, qlora_config):
+        self.qlora_config = qlora_config
 
-        # Enable LoRA (parameter-efficient fine-tuning)
-        peft_config = LoraConfig(
-            r=8,
-            lora_alpha=16,
-            target_modules=["q_proj", "v_proj"],  # may vary depending on model
-            lora_dropout=0.1,
-            bias="none",
-            task_type=TaskType.CAUSAL_LM
-        )
-        self.model = get_peft_model(self.model, peft_config)
+    def apply(self, model):
+        # Example: import and apply QLoRA-specific wrapper
+        from peft import get_peft_model, QLoRAConfig
+        # assume qlora_config is a QLoRAConfig or dict
+        cfg = self.qlora_config if isinstance(self.qlora_config, QLoRAConfig) else QLoRAConfig(**self.qlora_config)
+        return get_peft_model(model, cfg)
 
-        # Load dataset
-        raw_dataset = load_dataset(dataset_type, data_files=dataset_path)
+# --- Abstract Base FineTuner ---
+class BaseFineTuner(ABC):
+    def __init__(
+        self,
+        model_path: str,
+        dataset_path: str,
+        dataset_type: str,
+        strategy: FinetuningStrategy,
+        batch_size: int = 4,
+        max_length: int = 512,
+        lr: float = 5e-5,
+        warmup_steps: int = 100,
+        total_steps: int = 1000,
+    ):
+        self.accelerator    = Accelerator()
+        self.model_path     = model_path
+        self.dataset_path   = dataset_path
+        self.dataset_type   = dataset_type
+        self.strategy       = strategy
+        self.batch_size     = batch_size
+        self.max_length     = max_length
+        self.lr             = lr
+        self.warmup_steps   = warmup_steps
+        self.total_steps    = total_steps
 
-        def tokenize_function(example):
-            return self.tokenizer(example["text"], truncation=True, padding="max_length", max_length=512)
+        self.tokenizer      = self.build_tokenizer()
+        self.model          = self.build_model()
+        self.dataset        = self.build_dataset()
+        self.dataloader     = self.build_dataloader()
+        self.optimizer, self.lr_scheduler = self.build_optim_and_scheduler()
 
-        tokenized_dataset = raw_dataset.map(tokenize_function, batched=True)
-        self.dataloader = DataLoader(
-            tokenized_dataset["train"],
-            shuffle=True,
-            batch_size=4,
-            collate_fn=DataCollatorForLanguageModeling(
-                tokenizer=self.tokenizer, mlm=False
+        # wrap with accelerator
+        self.model, self.dataloader, self.optimizer, self.lr_scheduler = \
+            self.accelerator.prepare(
+                self.model,
+                self.dataloader,
+                self.optimizer,
+                self.lr_scheduler,
             )
+
+    @abstractmethod
+    def build_tokenizer(self) -> Any:
+        """Load tokenizer from self.model_path."""
+        ...
+
+    def build_model(self) -> Any:
+        """Load base model and apply finetuning strategy."""
+        base = AutoModelForCausalLM.from_pretrained(self.model_path)
+        return self.strategy.apply(base)
+
+    def build_dataset(self) -> Any:
+        """Load and tokenize dataset."""
+        raw = load_dataset(self.dataset_type, data_files=self.dataset_path)
+        def tok_fn(ex):
+            return self.tokenizer(
+                ex["text"], truncation=True,
+                padding="max_length", max_length=self.max_length
+            )
+        tok = raw.map(tok_fn, batched=True)
+        return tok["train"]
+
+    def build_dataloader(self) -> DataLoader:
+        """Wrap dataset in DataLoader with MLM collator disabled."""
+        collator = DataCollatorForLanguageModeling(
+            tokenizer=self.tokenizer, mlm=False
+        )
+        return DataLoader(
+            self.dataset,
+            shuffle=True,
+            batch_size=self.batch_size,
+            collate_fn=collator,
         )
 
-        # Optimizer and scheduler
-        self.optimizer = AdamW(self.model.parameters(), lr=5e-5)
-        self.lr_scheduler = get_linear_schedule_with_warmup(
-            self.optimizer,
-            num_warmup_steps=100,
-            num_training_steps=1000  # adjust based on dataset size
+    def build_optim_and_scheduler(self) -> Tuple[Optimizer, Any]:
+        """Configure optimizer and LR scheduler."""
+        opt = AdamW(self.model.parameters(), lr=self.lr)
+        sched = get_linear_schedule_with_warmup(
+            opt,
+            num_warmup_steps=self.warmup_steps,
+            num_training_steps=self.total_steps
         )
+        return opt, sched
 
-        # Prepare all with accelerator
-        self.model, self.dataloader, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
-            self.model, self.dataloader, self.optimizer, self.lr_scheduler
-        )
-
-        
-
-
+# --- Concrete Example Usage ---
+# from peft import LoraConfig, QLoRAConfig
+# lora_cfg  = LoraConfig(...)             # your LoRA settings
+# qlora_cfg = QLoRAConfig(...)            # your QLoRA settings
+# tuner = DefaultFineTuner(
+#     model_path="gpt2-medium",
+#     dataset_path="data/train.jsonl",
+#     dataset_type="json",
+#     strategy=QloraStrategy(qlora_cfg),
+# )
